@@ -4,6 +4,7 @@ import (
 	"dlog"
 	"encoding/binary"
 	"fastrpc"
+	//"fmt"
 	"genericsmr"
 	"genericsmrproto"
 	"io"
@@ -183,27 +184,31 @@ func (r *Replica) batching() {
 
 		select {
 		case <-batchClockChan:
-			batchSize := len(r.ProposeChan) + 1
+			//fmt.Println(len(r.ProposeChan))
+			if len(r.ProposeChan) > 0 {
+				batchSize := len(r.ProposeChan)
 
-			if batchSize > MAX_BATCH {
-				batchSize = MAX_BATCH
+				if batchSize > MAX_BATCH {
+					batchSize = MAX_BATCH
+				}
+
+				dlog.Printf("Batched %d\n", batchSize)
+
+				cmds := make([]state.Command, batchSize)
+				proposals := make([]*genericsmr.Propose, batchSize)
+				//cmds[0] = propose.Command
+				//proposals[0] = propose
+
+				for i := 0; i < batchSize; i++ {
+					prop := <-r.ProposeChan
+					cmds[i] = prop.Command
+					proposals[i] = prop
+				}
+
+				proposeBatchChan <- proposals
+				cmdBatchChan <- cmds
+				//fmt.Printf("one batch\n")
 			}
-
-			dlog.Printf("Batched %d\n", batchSize)
-
-			cmds := make([]state.Command, batchSize)
-			proposals := make([]*genericsmr.Propose, batchSize)
-			//cmds[0] = propose.Command
-			//proposals[0] = propose
-
-			for i := 0; i < batchSize; i++ {
-				prop := <-r.ProposeChan
-				cmds[i] = prop.Command
-				proposals[i] = prop
-			}
-
-			proposeBatchChan <- proposals
-			cmdBatchChan <- cmds
 			break
 		}
 	}
@@ -438,6 +443,8 @@ func (r *Replica) handlePropose(proposeBatch []*genericsmr.Propose, cmdBatch []s
 		r.ReplyProposeTS(preply, propose.Reply)
 		return
 	}
+
+	//fmt.Printf("processing \n")
 
 	for r.instanceSpace[r.crtInstance] != nil {
 		r.crtInstance++
@@ -677,6 +684,8 @@ func (r *Replica) handlePrepareReply(preply *paxosproto.PrepareReply) {
 func (r *Replica) handleAcceptReply(areply *paxosproto.AcceptReply) {
 	inst := r.instanceSpace[areply.Instance]
 
+	//fmt.Printf("Ready to commit\n")
+
 	if inst.status != PREPARED && inst.status != ACCEPTED {
 		// we've move on, these are delayed replies, so just ignore
 		return
@@ -690,6 +699,7 @@ func (r *Replica) handleAcceptReply(areply *paxosproto.AcceptReply) {
 			if inst.lb.clientProposals != nil && !r.Dreply {
 				// give client the all clear
 				for i := 0; i < len(inst.cmds); i++ {
+					//fmt.Println(inst.lb.clientProposals[i].CommandId)
 					propreply := &genericsmrproto.ProposeReplyTS{
 						TRUE,
 						inst.lb.clientProposals[i].CommandId,
