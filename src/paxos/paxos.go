@@ -18,6 +18,8 @@ const TRUE = uint8(1)
 const FALSE = uint8(0)
 
 const MAX_BATCH = 5000
+const CLOCK = 1000 * 1000           // in ns
+const BATCH_CLOCK = 1000 * 1000 * 5 // in ns
 
 type Replica struct {
 	*genericsmr.Replica // extends a generic Paxos replica
@@ -152,11 +154,58 @@ func (r *Replica) replyAccept(replicaId int32, reply *paxosproto.AcceptReply) {
 /* ============= */
 
 var clockChan chan bool
+var batchClockChan chan bool
+
+var proposeBatchChan chan []*genericsmr.Propose
+var cmdBatchChan chan []state.Command
+
+func (r *Replica) batchClock() {
+	for !r.Shutdown {
+		time.Sleep(BATCH_CLOCK)
+		batchClockChan <- true
+	}
+}
 
 func (r *Replica) clock() {
 	for !r.Shutdown {
-		time.Sleep(1000 * 1000 * 5)
+		time.Sleep(CLOCK)
 		clockChan <- true
+	}
+}
+
+// Handle Batching
+
+func (r *Replica) batching() {
+	batchClockChan = make(chan bool, 1)
+	go r.batchClock()
+
+	for !r.Shutdown {
+
+		select {
+		case <-batchClockChan:
+			batchSize := len(r.ProposeChan) + 1
+
+			if batchSize > MAX_BATCH {
+				batchSize = MAX_BATCH
+			}
+
+			dlog.Printf("Batched %d\n", batchSize)
+
+			cmds := make([]state.Command, batchSize)
+			proposals := make([]*genericsmr.Propose, batchSize)
+			//cmds[0] = propose.Command
+			//proposals[0] = propose
+
+			for i := 0; i < batchSize; i++ {
+				prop := <-r.ProposeChan
+				cmds[i] = prop.Command
+				proposals[i] = prop
+			}
+
+			proposeBatchChan <- proposals
+			cmdBatchChan <- cmds
+			break
+		}
 	}
 }
 
@@ -178,10 +227,16 @@ func (r *Replica) run() {
 		r.IsLeader = true
 	}
 
+	// Launch clocks
 	clockChan = make(chan bool, 1)
 	go r.clock()
 
-	onOffProposeChan := r.ProposeChan
+	// These two channels should be in lock step
+	proposeBatchChan = make(chan []*genericsmr.Propose)
+	cmdBatchChan = make(chan []state.Command)
+	onOffProposeChan := proposeBatchChan
+
+	go r.batching()
 
 	for !r.Shutdown {
 
@@ -189,13 +244,13 @@ func (r *Replica) run() {
 
 		case <-clockChan:
 			//activate the new proposals channel
-			onOffProposeChan = r.ProposeChan
+			onOffProposeChan = proposeBatchChan
 			break
 
-		case propose := <-onOffProposeChan:
-			//got a Propose from a client
-			dlog.Printf("Proposal with op %d\n", propose.Command.Op)
-			r.handlePropose(propose)
+		case proposeBatch := <-onOffProposeChan:
+			//got a caommand batch
+			cmdBatch := <-cmdBatchChan
+			r.handlePropose(proposeBatch, cmdBatch)
 			//deactivate the new proposals channel to prioritize the handling of protocol messages
 			onOffProposeChan = nil
 			break
@@ -376,7 +431,8 @@ func (r *Replica) bcastCommit(instance int32, ballot int32, command []state.Comm
 	}
 }
 
-func (r *Replica) handlePropose(propose *genericsmr.Propose) {
+func (r *Replica) handlePropose(proposeBatch []*genericsmr.Propose, cmdBatch []state.Command) {
+	propose := proposeBatch[0]
 	if !r.IsLeader {
 		preply := &genericsmrproto.ProposeReplyTS{FALSE, -1, state.NIL, 0}
 		r.ReplyProposeTS(preply, propose.Reply)
@@ -390,24 +446,27 @@ func (r *Replica) handlePropose(propose *genericsmr.Propose) {
 	instNo := r.crtInstance
 	r.crtInstance++
 
-	batchSize := len(r.ProposeChan) + 1
+	//batchSize := len(r.ProposeChan) + 1
+	//
+	//if batchSize > MAX_BATCH {
+	//	batchSize = MAX_BATCH
+	//}
+	//
+	//dlog.Printf("Batched %d\n", batchSize)
 
-	if batchSize > MAX_BATCH {
-		batchSize = MAX_BATCH
-	}
+	//cmds := make([]state.Command, batchSize)
+	//proposals := make([]*genericsmr.Propose, batchSize)
+	//cmds[0] = propose.Command
+	//proposals[0] = propose
+	//
+	//for i := 1; i < batchSize; i++ {
+	//	prop := <-r.ProposeChan
+	//	cmds[i] = prop.Command
+	//	proposals[i] = prop
+	//}
 
-	dlog.Printf("Batched %d\n", batchSize)
-
-	cmds := make([]state.Command, batchSize)
-	proposals := make([]*genericsmr.Propose, batchSize)
-	cmds[0] = propose.Command
-	proposals[0] = propose
-
-	for i := 1; i < batchSize; i++ {
-		prop := <-r.ProposeChan
-		cmds[i] = prop.Command
-		proposals[i] = prop
-	}
+	cmds := cmdBatch
+	proposals := proposeBatch
 
 	if r.defaultBallot == -1 {
 		r.instanceSpace[instNo] = &Instance{
