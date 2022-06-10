@@ -4,6 +4,9 @@ import (
 	"dlog"
 	"encoding/binary"
 	"fastrpc"
+	"fmt"
+	"sync"
+
 	//"fmt"
 	"genericsmr"
 	"genericsmrproto"
@@ -18,9 +21,9 @@ const CHAN_BUFFER_SIZE = 200000
 const TRUE = uint8(1)
 const FALSE = uint8(0)
 
-const MAX_BATCH = 5000
-const CLOCK = 1000 * 1000           // in ns
-const BATCH_CLOCK = 1000 * 1000 * 5 // in ns
+const MAX_BATCH = 50000
+const CLOCK = 1000              // in ns
+const BATCH_CLOCK = 1000 * 1000 // in ns
 
 type Replica struct {
 	*genericsmr.Replica // extends a generic Paxos replica
@@ -155,17 +158,18 @@ func (r *Replica) replyAccept(replicaId int32, reply *paxosproto.AcceptReply) {
 /* ============= */
 
 var clockChan chan bool
-var batchClockChan chan bool
+
+//var batchClockChan chan bool
 
 var proposeBatchChan chan []*genericsmr.Propose
 var cmdBatchChan chan []state.Command
 
-func (r *Replica) batchClock() {
-	for !r.Shutdown {
-		time.Sleep(BATCH_CLOCK)
-		batchClockChan <- true
-	}
-}
+//func (r *Replica) batchClock() {
+//	for !r.Shutdown {
+//		time.Sleep(BATCH_CLOCK)
+//		batchClockChan <- true
+//	}
+//}
 
 func (r *Replica) clock() {
 	for !r.Shutdown {
@@ -175,44 +179,87 @@ func (r *Replica) clock() {
 }
 
 // Handle Batching
-
-func (r *Replica) batching() {
-	batchClockChan = make(chan bool, 1)
-	go r.batchClock()
-
+func (r *Replica) batchClock(batchClockChan chan bool) {
 	for !r.Shutdown {
-
-		select {
-		case <-batchClockChan:
-			//fmt.Println(len(r.ProposeChan))
-			if len(r.ProposeChan) > 0 {
-				batchSize := len(r.ProposeChan)
-
-				if batchSize > MAX_BATCH {
-					batchSize = MAX_BATCH
-				}
-
-				dlog.Printf("Batched %d\n", batchSize)
-
-				cmds := make([]state.Command, batchSize)
-				proposals := make([]*genericsmr.Propose, batchSize)
-				//cmds[0] = propose.Command
-				//proposals[0] = propose
-
-				for i := 0; i < batchSize; i++ {
-					prop := <-r.ProposeChan
-					cmds[i] = prop.Command
-					proposals[i] = prop
-				}
-
-				proposeBatchChan <- proposals
-				cmdBatchChan <- cmds
-				//fmt.Printf("one batch\n")
-			}
-			break
-		}
+		time.Sleep(BATCH_CLOCK)
+		batchClockChan <- true
 	}
 }
+
+var mu sync.Mutex
+
+func (r *Replica) batching() {
+	batchClockChan := make(chan bool, 1)
+	go r.batchClock(batchClockChan)
+
+	for !r.Shutdown {
+		cmds := make([]state.Command, 1)
+		proposals := make([]*genericsmr.Propose, 1)
+
+		//batch_loop:
+		now := time.Now()
+		for i := 0; i < MAX_BATCH; i++ {
+			mu.Lock()
+			if len(r.ProposeChan) > 0 {
+				prop := <-r.ProposeChan
+				mu.Unlock()
+				cmds = append(cmds, prop.Command)
+				proposals = append(proposals, prop)
+			}
+			mu.Unlock()
+
+			select {
+			case <-batchClockChan:
+				break //batch_loop
+			default:
+			}
+		}
+		proposeBatchChan <- proposals
+		cmdBatchChan <- cmds
+		fmt.Println(now.Sub(time.Now()))
+	}
+}
+
+//func (r *Replica) batching() {
+//	batchClockChan = make(chan bool, 1)
+//	go r.batchClock()
+//
+//	for !r.Shutdown {
+//
+//		select {
+//		case <-batchClockChan:
+//			//fmt.Println(len(r.ProposeChan))
+//			if len(r.ProposeChan) > 0 {
+//				batchSize := len(r.ProposeChan)
+//
+//				if batchSize > MAX_BATCH {
+//					batchSize = MAX_BATCH
+//				}
+//
+//				dlog.Printf("Batched %d\n", batchSize)
+//
+//				cmds := make([]state.Command, batchSize)
+//				proposals := make([]*genericsmr.Propose, batchSize)
+//				//cmds[0] = propose.Command
+//				//proposals[0] = propose
+//
+//				now := time.Now()
+//
+//				for i := 0; i < batchSize; i++ {
+//					prop := <-r.ProposeChan
+//					cmds[i] = prop.Command
+//					proposals[i] = prop
+//				}
+//				fmt.Println(now.Sub(time.Now()))
+//
+//				proposeBatchChan <- proposals
+//				cmdBatchChan <- cmds
+//				//fmt.Printf("one batch\n")
+//			}
+//			break
+//		}
+//	}
+//}
 
 /* Main event processing loop */
 
@@ -241,6 +288,7 @@ func (r *Replica) run() {
 	cmdBatchChan = make(chan []state.Command)
 	onOffProposeChan := proposeBatchChan
 
+	go r.batching()
 	go r.batching()
 
 	for !r.Shutdown {
