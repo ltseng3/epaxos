@@ -18,9 +18,9 @@ const CHAN_BUFFER_SIZE = 200000
 const TRUE = uint8(1)
 const FALSE = uint8(0)
 
-const MAX_BATCH = 100000
-const CLOCK = 1000                  // in ns
-const BATCH_CLOCK = 1000 * 1000 * 5 // in ns
+//const MAX_BATCH = 100000
+const CLOCK = 1000 // in ns
+//const BATCH_CLOCK = 1000 * 1000 * 5 // in ns
 
 type Replica struct {
 	*genericsmr.Replica // extends a generic Paxos replica
@@ -70,8 +70,8 @@ type LeaderBookkeeping struct {
 	nacks           int
 }
 
-func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply bool, durable bool) *Replica {
-	r := &Replica{genericsmr.NewReplica(id, peerAddrList, thrifty, exec, dreply),
+func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply bool, durable bool, bSize int, bClock int) *Replica {
+	r := &Replica{genericsmr.NewReplica(id, peerAddrList, thrifty, exec, dreply, bSize, bClock),
 		make(chan fastrpc.Serializable, genericsmr.CHAN_BUFFER_SIZE),
 		make(chan fastrpc.Serializable, genericsmr.CHAN_BUFFER_SIZE),
 		make(chan fastrpc.Serializable, genericsmr.CHAN_BUFFER_SIZE),
@@ -176,25 +176,22 @@ func (r *Replica) clock() {
 }
 
 // Handle Batching
-func (r *Replica) batchClock(batchClockChan chan bool) {
+func (r *Replica) batchClockTick(batchClockChan chan bool) {
 	for !r.Shutdown {
-		time.Sleep(BATCH_CLOCK)
+		//time.Sleep(BATCH_CLOCK)
+		time.Sleep(time.Duration(r.BatchClock))
 		batchClockChan <- true
 	}
 }
 
 func (r *Replica) batching(id int) {
 	batchClockChan := make(chan bool, 1)
-	go r.batchClock(batchClockChan)
+	go r.batchClockTick(batchClockChan)
 
-	currentBatchSize := 0
-
-	var cmds []state.Command
-	var proposals []*genericsmr.Propose
 	var proposeChan chan *genericsmr.Propose
 	if id == 0 {
 		proposeChan = r.ProposeChan
-	}else{
+	} else {
 		proposeChan = r.ProposeChan1
 	}
 
@@ -202,31 +199,38 @@ func (r *Replica) batching(id int) {
 
 		select {
 		case <-batchClockChan:
-			if currentBatchSize > 0 {
-				proposeBatchChan <- proposals
-				cmdBatchChan <- cmds
-			}
-			currentBatchSize = 0
-		case prop := <- proposeChan:
-			if currentBatchSize == 0 {
-				cmds = make([]state.Command, 1)
-				proposals = make([]*genericsmr.Propose, 1)
-				cmds[0] = prop.Command
-				proposals[0] = prop
-				currentBatchSize++
+			if id == 0 {
+				proposeChan = r.ProposeChan
 			} else {
-				cmds = append(cmds, prop.Command)
-				proposals = append(proposals, prop)
-				currentBatchSize++
-				//
-				if currentBatchSize == MAX_BATCH {
-					proposeBatchChan <- proposals
-					cmdBatchChan <- cmds
-					fmt.Println(currentBatchSize)
-					currentBatchSize = 0
-					// optimizaiton: ignore next clock
-				}
+				proposeChan = r.ProposeChan1
 			}
+			break
+
+		case prop := <-proposeChan:
+
+			batchSize := len(proposeChan) + 1
+
+			if batchSize > r.BatchSize {
+				batchSize = r.BatchSize
+			}
+
+			cmds := make([]state.Command, batchSize)
+			proposals := make([]*genericsmr.Propose, batchSize)
+			cmds[0] = prop.Command
+			proposals[0] = prop
+
+			for i := 1; i < batchSize; i++ {
+				prop := <-proposeChan
+				cmds[i] = prop.Command
+				proposals[i] = prop
+			}
+
+			proposeBatchChan <- proposals
+			cmdBatchChan <- cmds
+			fmt.Println(batchSize)
+			proposeChan = nil
+			break
+
 		}
 	}
 }

@@ -44,9 +44,9 @@ type Replica struct {
 
 	State *state.State
 
-	ProposeChan chan *Propose // channel for client proposals
+	ProposeChan  chan *Propose // channel for client proposals
 	ProposeChan1 chan *Propose // channel for client proposals
-	BeaconChan  chan *Beacon  // channel for beacons from peer replicas
+	BeaconChan   chan *Beacon  // channel for beacons from peer replicas
 
 	Shutdown bool
 
@@ -66,9 +66,12 @@ type Replica struct {
 	Ewma []float64
 
 	OnClientConnect chan bool
+
+	BatchSize  int
+	BatchClock int
 }
 
-func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply bool) *Replica {
+func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply bool, bSize int, bClock int) *Replica {
 	r := &Replica{
 		len(peerAddrList),
 		int32(id),
@@ -93,7 +96,9 @@ func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply b
 		make(map[uint8]*RPCPair),
 		genericsmrproto.GENERIC_SMR_BEACON_REPLY + 1,
 		make([]float64, len(peerAddrList)),
-		make(chan bool, 100)}
+		make(chan bool, 100),
+		bSize,
+		bClock}
 
 	var err error
 
@@ -297,7 +302,7 @@ func (r *Replica) clientListener(conn net.Conn) {
 			if goChan0 {
 				r.ProposeChan <- &Propose{prop, writer}
 				goChan0 = false
-			}else{
+			} else {
 				r.ProposeChan1 <- &Propose{prop, writer}
 				goChan0 = true
 			}
