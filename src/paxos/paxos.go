@@ -183,7 +183,7 @@ func (r *Replica) batchClock(batchClockChan chan bool) {
 	}
 }
 
-func (r *Replica) batching() {
+func (r *Replica) batching(id int) {
 	batchClockChan := make(chan bool, 1)
 	go r.batchClock(batchClockChan)
 
@@ -191,6 +191,12 @@ func (r *Replica) batching() {
 
 	var cmds []state.Command
 	var proposals []*genericsmr.Propose
+	var proposeChan chan *genericsmr.Propose
+	if id == 0 {
+		proposeChan = r.ProposeChan
+	}else{
+		proposeChan = r.ProposeChan1
+	}
 
 	for !r.Shutdown {
 
@@ -201,7 +207,7 @@ func (r *Replica) batching() {
 				cmdBatchChan <- cmds
 			}
 			currentBatchSize = 0
-		case prop := <-r.ProposeChan:
+		case prop := <- proposeChan:
 			if currentBatchSize == 0 {
 				cmds = make([]state.Command, 1)
 				proposals = make([]*genericsmr.Propose, 1)
@@ -346,8 +352,8 @@ func (r *Replica) run() {
 	cmdBatchChan = make(chan []state.Command)
 	onOffProposeChan := proposeBatchChan
 
-	go r.batching()
-	go r.batching()
+	go r.batching(0)
+	go r.batching(1)
 
 	for !r.Shutdown {
 

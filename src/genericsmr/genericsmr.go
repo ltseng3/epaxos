@@ -45,6 +45,7 @@ type Replica struct {
 	State *state.State
 
 	ProposeChan chan *Propose // channel for client proposals
+	ProposeChan1 chan *Propose // channel for client proposals
 	BeaconChan  chan *Beacon  // channel for beacons from peer replicas
 
 	Shutdown bool
@@ -78,6 +79,7 @@ func NewReplica(id int, peerAddrList []string, thrifty bool, exec bool, dreply b
 		make([]bool, len(peerAddrList)),
 		nil,
 		state.InitState(),
+		make(chan *Propose, CHAN_BUFFER_SIZE),
 		make(chan *Propose, CHAN_BUFFER_SIZE),
 		make(chan *Beacon, CHAN_BUFFER_SIZE),
 		false,
@@ -276,6 +278,9 @@ func (r *Replica) clientListener(conn net.Conn) {
 	writer := bufio.NewWriter(conn)
 	var msgType byte //:= make([]byte, 1)
 	var err error
+
+	goChan0 := true
+
 	for !r.Shutdown && err == nil {
 
 		if msgType, err = reader.ReadByte(); err != nil {
@@ -289,7 +294,14 @@ func (r *Replica) clientListener(conn net.Conn) {
 			if err = prop.Unmarshal(reader); err != nil {
 				break
 			}
-			r.ProposeChan <- &Propose{prop, writer}
+			if goChan0 {
+				r.ProposeChan <- &Propose{prop, writer}
+				goChan0 = false
+			}else{
+				r.ProposeChan1 <- &Propose{prop, writer}
+				goChan0 = true
+			}
+
 			break
 
 		case genericsmrproto.READ:
