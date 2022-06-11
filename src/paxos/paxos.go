@@ -193,30 +193,49 @@ func (r *Replica) batching() {
 	go r.batchClock(batchClockChan)
 
 	for !r.Shutdown {
-		cmds := make([]state.Command, 1)
-		proposals := make([]*genericsmr.Propose, 1)
-
-		//batch_loop:
-		now := time.Now()
-		for i := 0; i < MAX_BATCH; i++ {
-			mu.Lock()
-			if len(r.ProposeChan) > 0 {
-				prop := <-r.ProposeChan
-				mu.Unlock()
-				cmds = append(cmds, prop.Command)
-				proposals = append(proposals, prop)
-			}
+		unlocked := false
+		mu.Lock()
+		if len(r.ProposeChan) > 0 {
+			cmds := make([]state.Command, 1)
+			proposals := make([]*genericsmr.Propose, 1)
+			prop := <-r.ProposeChan
 			mu.Unlock()
+			unlocked = true
 
-			select {
-			case <-batchClockChan:
-				break //batch_loop
-			default:
+			cmds[0] = prop.Command
+			proposals[0] = prop
+
+			//batch_loop:
+			now := time.Now()
+			for i := 0; i < MAX_BATCH; i++ {
+				unlocked2 := false
+				mu.Lock()
+				if len(r.ProposeChan) > 0 {
+					prop = <-r.ProposeChan
+					mu.Unlock()
+					unlocked2 = true
+					cmds = append(cmds, prop.Command)
+					proposals = append(proposals, prop)
+				}
+				if !unlocked2 {
+					mu.Unlock()
+				}
+
+				select {
+				case <-batchClockChan:
+					break //batch_loop
+				default:
+				}
 			}
+			proposeBatchChan <- proposals
+			cmdBatchChan <- cmds
+
+			fmt.Println(now.Sub(time.Now()))
 		}
-		proposeBatchChan <- proposals
-		cmdBatchChan <- cmds
-		fmt.Println(now.Sub(time.Now()))
+		if !unlocked {
+			mu.Unlock()
+		}
+		time.Sleep(1000)
 	}
 }
 
