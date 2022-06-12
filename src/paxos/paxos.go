@@ -19,7 +19,7 @@ const TRUE = uint8(1)
 const FALSE = uint8(0)
 
 //const MAX_BATCH = 100000
-const CLOCK = 1000 // in ns
+const CLOCK = 1000 * 100 // in ns
 //const BATCH_CLOCK = 1000 * 1000 * 5 // in ns
 
 type Replica struct {
@@ -179,7 +179,7 @@ func (r *Replica) clock() {
 func (r *Replica) batchClockTick(batchClockChan chan bool) {
 	for !r.Shutdown {
 		//time.Sleep(BATCH_CLOCK)
-		time.Sleep(time.Duration(r.BatchClock))
+		time.Sleep(time.Duration(r.BatchClock*1000))
 		batchClockChan <- true
 	}
 }
@@ -463,7 +463,9 @@ func (r *Replica) bcastPrepare(instance int32, ballot int32, toInfinity bool) {
 	}
 }
 
-var pa paxosproto.Accept
+var pa = make([]paxosproto.Accept, CHAN_BUFFER_SIZE)
+
+var numMsg int
 
 func (r *Replica) bcastAccept(instance int32, ballot int32, command []state.Command) {
 	defer func() {
@@ -471,17 +473,20 @@ func (r *Replica) bcastAccept(instance int32, ballot int32, command []state.Comm
 			log.Println("Accept bcast failed:", err)
 		}
 	}()
-	pa.LeaderId = r.Id
-	pa.Instance = instance
-	pa.Ballot = ballot
-	pa.Command = command
-	args := &pa
+	fmt.Println("Size: %d", len(command))
+	//var pa paxosproto.Accept
+	pa[instance].LeaderId = r.Id
+	pa[instance].Instance = instance
+	pa[instance].Ballot = ballot
+	pa[instance].Command = command
+	args := &pa[instance]
 	//args := &paxosproto.Accept{r.Id, instance, ballot, command}
 
 	n := r.N - 1
 	if r.Thrifty {
 		n = r.N >> 1
 	}
+	n = 1 // thrifty for r.N = 3
 	q := r.Id
 
 	for sent := 0; sent < n; {
@@ -493,7 +498,13 @@ func (r *Replica) bcastAccept(instance int32, ballot int32, command []state.Comm
 			continue
 		}
 		sent++
-		r.SendMsg(q, r.acceptRPC, args)
+		numMsg++
+		//if numMsg % 5 == 0 {
+		
+			r.SendMsg(q, r.acceptRPC, args)
+		//}else{
+		//	r.SendMsgNoFlush(q, r.acceptRPC, args)
+		//}
 	}
 }
 
@@ -610,7 +621,9 @@ func (r *Replica) handlePropose(proposeBatch []*genericsmr.Propose, cmdBatch []s
 		r.recordCommands(cmds)
 		r.sync()
 
-		r.bcastAccept(instNo, r.defaultBallot, cmds)
+		//now := time.Now()
+		go r.bcastAccept(instNo, r.defaultBallot, cmds)
+		//fmt.Println(time.Now().Sub(now))
 		dlog.Printf("Fast round for instance %d\n", instNo)
 	}
 }
