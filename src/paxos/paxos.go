@@ -354,6 +354,13 @@ func (r *Replica) run() {
 	clockChan = make(chan bool, 1)
 	go r.clock()
 
+	// Handle sending large messages
+	instanceChan = make(chan int32, CHAN_BUFFER_SIZE)
+	ballotChan = make(chan int32, CHAN_BUFFER_SIZE)
+	commandChan = make(chan []state.Command, CHAN_BUFFER_SIZE)
+
+	go r.bcastAccept(instanceChan, ballotChan, commandChan)
+
 	// These two channels should be in lock step
 	proposeBatchChan = make(chan []*genericsmr.Propose)
 	cmdBatchChan = make(chan []state.Command)
@@ -361,12 +368,6 @@ func (r *Replica) run() {
 
 	go r.batching(0)
 	go r.batching(1)
-
-	instanceChan = make(chan int32)
-	ballotChan = make(chan int32)
-	commandChan = make(chan []state.Command)
-
-	go r.bcastAccept(instanceChan, ballotChan, commandChan)
 
 	for !r.Shutdown {
 
@@ -472,9 +473,7 @@ func (r *Replica) bcastPrepare(instance int32, ballot int32, toInfinity bool) {
 	}
 }
 
-var pa = make([]paxosproto.Accept, CHAN_BUFFER_SIZE)
-
-var numMsg int
+var pa paxosproto.Accept
 
 func (r *Replica) bcastAccept(instanceChan chan int32, ballotChan chan int32, commandChan chan []state.Command) {
 	defer func() {
@@ -487,11 +486,14 @@ func (r *Replica) bcastAccept(instanceChan chan int32, ballotChan chan int32, co
 		command := <-commandChan
 		instance := <-instanceChan
 		ballot := <-ballotChan
-		pa[instance].LeaderId = r.Id
-		pa[instance].Instance = instance
-		pa[instance].Ballot = ballot
-		pa[instance].Command = command
-		args := &pa[instance]
+
+		fmt.Println("sent: %d", len(command))
+
+		pa.LeaderId = r.Id
+		pa.Instance = instance
+		pa.Ballot = ballot
+		pa.Command = command
+		args := &pa
 
 		n := r.N - 1
 		if r.Thrifty {
@@ -508,10 +510,9 @@ func (r *Replica) bcastAccept(instanceChan chan int32, ballotChan chan int32, co
 				continue
 			}
 			sent++
-			numMsg++
 
 			r.SendMsg(q, r.acceptRPC, args)
-
+			time.Sleep(1000)
 		}
 	}
 }
