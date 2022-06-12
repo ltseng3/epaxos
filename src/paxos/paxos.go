@@ -160,6 +160,9 @@ var clockChan chan bool
 
 var proposeBatchChan chan []*genericsmr.Propose
 var cmdBatchChan chan []state.Command
+var instanceChan chan int32
+var ballotChan chan int32
+var commandChan chan []state.Command
 
 //func (r *Replica) batchClock() {
 //	for !r.Shutdown {
@@ -179,7 +182,7 @@ func (r *Replica) clock() {
 func (r *Replica) batchClockTick(batchClockChan chan bool) {
 	for !r.Shutdown {
 		//time.Sleep(BATCH_CLOCK)
-		time.Sleep(time.Duration(r.BatchClock*1000))
+		time.Sleep(time.Duration(r.BatchClock * 1000))
 		batchClockChan <- true
 	}
 }
@@ -359,6 +362,12 @@ func (r *Replica) run() {
 	go r.batching(0)
 	go r.batching(1)
 
+	instanceChan = make(chan int32)
+	ballotChan = make(chan int32)
+	commandChan = make(chan []state.Command)
+
+	go r.bcastAccept(instanceChan, ballotChan, commandChan)
+
 	for !r.Shutdown {
 
 		select {
@@ -467,44 +476,43 @@ var pa = make([]paxosproto.Accept, CHAN_BUFFER_SIZE)
 
 var numMsg int
 
-func (r *Replica) bcastAccept(instance int32, ballot int32, command []state.Command) {
+func (r *Replica) bcastAccept(instanceChan chan int32, ballotChan chan int32, commandChan chan []state.Command) {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Println("Accept bcast failed:", err)
 		}
 	}()
-	fmt.Println("Size: %d", len(command))
-	//var pa paxosproto.Accept
-	pa[instance].LeaderId = r.Id
-	pa[instance].Instance = instance
-	pa[instance].Ballot = ballot
-	pa[instance].Command = command
-	args := &pa[instance]
-	//args := &paxosproto.Accept{r.Id, instance, ballot, command}
 
-	n := r.N - 1
-	if r.Thrifty {
-		n = r.N >> 1
-	}
-	n = 1 // thrifty for r.N = 3
-	q := r.Id
+	for !r.Shutdown {
+		command := <-commandChan
+		instance := <-instanceChan
+		ballot := <-ballotChan
+		pa[instance].LeaderId = r.Id
+		pa[instance].Instance = instance
+		pa[instance].Ballot = ballot
+		pa[instance].Command = command
+		args := &pa[instance]
 
-	for sent := 0; sent < n; {
-		q = (q + 1) % int32(r.N)
-		if q == r.Id {
-			break
+		n := r.N - 1
+		if r.Thrifty {
+			n = r.N >> 1
 		}
-		if !r.Alive[q] {
-			continue
-		}
-		sent++
-		numMsg++
-		//if numMsg % 5 == 0 {
-		
+		q := r.Id
+
+		for sent := 0; sent < n; {
+			q = (q + 1) % int32(r.N)
+			if q == r.Id {
+				break
+			}
+			if !r.Alive[q] {
+				continue
+			}
+			sent++
+			numMsg++
+
 			r.SendMsg(q, r.acceptRPC, args)
-		//}else{
-		//	r.SendMsgNoFlush(q, r.acceptRPC, args)
-		//}
+
+		}
 	}
 }
 
@@ -622,7 +630,10 @@ func (r *Replica) handlePropose(proposeBatch []*genericsmr.Propose, cmdBatch []s
 		r.sync()
 
 		//now := time.Now()
-		go r.bcastAccept(instNo, r.defaultBallot, cmds)
+		//r.bcastAccept(instNo, r.defaultBallot, cmds)
+		commandChan <- cmds
+		instanceChan <- instNo
+		ballotChan <- r.defaultBallot
 		//fmt.Println(time.Now().Sub(now))
 		dlog.Printf("Fast round for instance %d\n", instNo)
 	}
@@ -790,7 +801,8 @@ func (r *Replica) handlePrepareReply(preply *paxosproto.PrepareReply) {
 			}
 			r.recordInstanceMetadata(r.instanceSpace[preply.Instance])
 			r.sync()
-			r.bcastAccept(preply.Instance, inst.ballot, inst.cmds)
+			//TODO: fix bcastAccept
+			//r.bcastAccept(preply.Instance, inst.ballot, inst.cmds)
 		}
 	} else {
 		// TODO: there is probably another active leader
